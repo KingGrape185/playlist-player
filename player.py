@@ -46,6 +46,7 @@ class ClickSlider(QSlider):
 
 class Player(QMainWindow):
     update_found = pyqtSignal(str, str)
+    title_found = pyqtSignal(str, str)
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Playlist Player"); self.setAcceptDrops(True)
@@ -53,6 +54,9 @@ class Player(QMainWindow):
         self.tmp = None; self.files = []; self.idx = -1; self.order = []
         self.pos = json.loads(self.cfg.value("positions", "{}")); self.watched = set(json.loads(self.cfg.value("watched", "[]")))
         self.repeat = 0
+        self.yt_watched = set(json.loads(self.cfg.value("yt_watched", "[]"))); self.yt_titles = json.loads(self.cfg.value("yt_titles", "{}"))
+        self.yt_ids = []; self.yt_cur = -1; self.yt_pid = ""
+        self.yt_timer = QTimer(interval=1000); self.yt_timer.timeout.connect(self.yt_poll)
         self.audio = QAudioOutput(); self.mp = QMediaPlayer(); self.mp.setAudioOutput(self.audio)
         self.audio.setVolume(float(self.cfg.value("volume", 0.8)))
         self.video = QVideoWidget(); self.mp.setVideoOutput(self.video)
@@ -68,7 +72,8 @@ class Player(QMainWindow):
         updb = QPushButton("Check for updates"); updb.clicked.connect(lambda: self.check_update(True))
         row = QHBoxLayout(); row.addWidget(openb); row.addWidget(zipb)
         side = QWidget(); sl = QVBoxLayout(side); sl.setContentsMargins(6, 6, 6, 6)
-        for w in (self.search, self.list, self.info): sl.addWidget(w)
+        self.ytlist = QListWidget(); self.ytlist.hide(); self.ytlist.itemDoubleClicked.connect(self.yt_play_item)
+        for w in (self.search, self.list, self.ytlist, self.info): sl.addWidget(w)
         sl.addLayout(row); sl.addWidget(self.ytb); sl.addWidget(updb); side.setMinimumWidth(260); self.side = side
 
         # controls
@@ -115,7 +120,7 @@ class Player(QMainWindow):
         g = self.cfg.value("geometry")
         if g: self.restoreGeometry(g)
         else: self.resize(1280, 760)
-        self.update_found.connect(self.on_update); QTimer.singleShot(4000, self.check_update)
+        self.update_found.connect(self.on_update); self.title_found.connect(self.on_title); QTimer.singleShot(4000, self.check_update)
         last = self.cfg.value("source")
         if last and os.path.isdir(last): self.load_dir(last)
         elif len(sys.argv) > 1: self.load_path(sys.argv[1])
@@ -152,7 +157,8 @@ class Player(QMainWindow):
             it = self.list.item(r); i = it.data(Qt.ItemDataRole.UserRole); f = self.files[i]
             it.setText(("✓ " if f in self.watched else "") + f"{i+1}. {Path(f).stem}")
     def filter(self, t):
-        for r in range(self.list.count()): self.list.item(r).setHidden(t.lower() not in self.list.item(r).text().lower())
+        lst = self.ytlist if self.ytb.isChecked() else self.list
+        for r in range(lst.count()): lst.item(r).setHidden(t.lower() not in lst.item(r).text().lower())
     def rebuild_order(self):
         self.order = list(range(len(self.files)))
         if self.shuf.isChecked(): random.shuffle(self.order)
@@ -188,6 +194,7 @@ class Player(QMainWindow):
         if self.ytb.isChecked(): return
         self.mp.pause() if self.mp.playbackState() == QMediaPlayer.PlaybackState.PlayingState else self.mp.play()
     def next(self, wrap=False):
+        if self.ytb.isChecked(): self.yt_cmd("p.nextVideo()"); return
         if not self.order: return
         k = self.order.index(self.idx) + 1
         if k >= len(self.order):
@@ -195,6 +202,7 @@ class Player(QMainWindow):
             k = 0
         self.play(self.order[k])
     def prev(self):
+        if self.ytb.isChecked(): self.yt_cmd("p.previousVideo()"); return
         if not self.order: return
         if self.mp.position() > 4000: self.mp.setPosition(0); return
         self.play(self.order[max(0, self.order.index(self.idx) - 1)])
@@ -213,7 +221,7 @@ class Player(QMainWindow):
     # ---- YouTube mode (official embed: views count, YouTube's ads/Premium rules apply)
     def yt_toggle(self):
         if not self.ytb.isChecked():
-            self.stack.setCurrentWidget(self.video); self.web.setHtml(""); self.controls.show(); self.side.show(); return
+            self.yt_off(); return
         if QWebEngineView is None:
             self.ytb.setChecked(False); QMessageBox.warning(self, "Missing", "Install PyQt6-WebEngine (build.bat does this)."); return
         t, ok = QInputDialog.getText(self, "YouTube playlist", "Playlist URL or ID:", text=self.cfg.value("yt_pl", YT_PLAYLIST))
@@ -228,11 +236,66 @@ class Player(QMainWindow):
             st.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
             page.fullScreenRequested.connect(lambda r: (r.accept(), self.showFullScreen() if r.toggleOn() else self.showNormal()))
             self.web = QWebEngineView(); self.web.setPage(page); self.stack.addWidget(self.web)
-        html = ('<html><body style="margin:0;background:#000"><iframe style="width:100%;height:100vh;border:0" '
-                f'src="https://www.youtube.com/embed/videoseries?list={pid}&autoplay=1&rel=0" '
-                'allow="autoplay; encrypted-media; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe></body></html>')
-        self.web.setHtml(html, QUrl("https://playlist-player.app/"))
+        self.yt_start(pid)
         self.stack.setCurrentWidget(self.web); self.controls.hide()
+
+    # ---- YouTube playlist sidebar (playback stays in YouTube's official player)
+    PAGE = """<html><head><style>html,body,#p{margin:0;height:100%;background:#000}</style></head><body><div id="p"></div>
+<script src="https://www.youtube.com/iframe_api"></script>
+<script>
+var p;
+function onYouTubeIframeAPIReady(){
+  p=new YT.Player('p',{width:'100%',height:'100%',playerVars:{autoplay:1,rel:0},
+    events:{onReady:function(){p.loadPlaylist({listType:'playlist',list:'__PID__',index:__START__});}}});
+}
+</script></body></html>"""
+    def yt_start(self, pid):
+        self.yt_pid = pid; self.yt_ids = []; self.yt_cur = -1
+        start = int(self.cfg.value("yt_idx", 0)) if self.cfg.value("yt_idx_for") == pid else 0
+        self.web.setHtml(self.PAGE.replace("__PID__", pid).replace("__START__", str(start)), QUrl("https://playlist-player.app/"))
+        self.ytlist.clear(); self.list.hide(); self.ytlist.show(); self.search.clear(); self.info.setText("Loading playlist…")
+        self.yt_timer.start()
+    def yt_off(self):
+        self.yt_timer.stop(); self.stack.setCurrentWidget(self.video); self.web.setHtml("")
+        self.controls.show(); self.side.show(); self.ytlist.hide(); self.list.show(); self.search.clear(); self.setWindowTitle("Playlist Player")
+        self.info.setText(f"{self.idx+1} of {len(self.files)}" if self.files else "Drop a folder or .zip here")
+    def yt_cmd(self, js):
+        if self.web: self.web.page().runJavaScript(js)
+    def yt_poll(self):
+        if self.web: self.web.page().runJavaScript("(window.p&&p.getPlaylist&&p.getPlaylist())?JSON.stringify({ids:p.getPlaylist(),i:p.getPlaylistIndex(),s:p.getPlayerState()}):''", self.yt_got)
+    def yt_got(self, r):
+        if not r: return
+        d = json.loads(r); ids = d.get("ids") or []
+        if ids and ids != self.yt_ids:
+            self.yt_ids = ids; self.ytlist.clear()
+            for _ in ids: self.ytlist.addItem(QListWidgetItem())
+            self.yt_cur = -1
+            for k in range(len(ids)): self.yt_label(k)
+            todo = [v for v in dict.fromkeys(ids) if v not in self.yt_titles]
+            if todo: threading.Thread(target=self.yt_fetch_titles, args=(todo,), daemon=True).start()
+        i = d.get("i")
+        if ids and i is not None and 0 <= i < len(ids):
+            if d.get("s") == 0 and ids[i] not in self.yt_watched: self.yt_watched.add(ids[i]); self.yt_label(i)
+            if i != self.yt_cur:
+                self.yt_cur = i; self.ytlist.setCurrentRow(i); self.cfg.setValue("yt_idx", i); self.cfg.setValue("yt_idx_for", self.yt_pid)
+                self.info.setText(f"{i+1} of {len(ids)} · {sum(x in self.yt_watched for x in ids)} watched")
+    def yt_label(self, k):
+        it = self.ytlist.item(k)
+        if it: v = self.yt_ids[k]; it.setText(("✓ " if v in self.yt_watched else "") + f"{k+1}. " + self.yt_titles.get(v, "Loading…"))
+    def yt_fetch_titles(self, ids):
+        from concurrent.futures import ThreadPoolExecutor
+        def one(v):
+            try:
+                u = "https://www.youtube.com/oembed?format=json&url=https://www.youtube.com/watch?v=" + v
+                return v, json.load(urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"}), timeout=10))["title"]
+            except Exception: return v, ""
+        with ThreadPoolExecutor(8) as ex:
+            for v, t in ex.map(one, ids): self.title_found.emit(v, t)
+    def on_title(self, v, t):
+        self.yt_titles[v] = t or "Unavailable video"
+        for k, x in enumerate(self.yt_ids):
+            if x == v: self.yt_label(k)
+    def yt_play_item(self, it): self.yt_cmd(f"p.playVideoAt({self.ytlist.row(it)})")
 
     # ---- updater (GitHub Releases)
     def check_update(self, manual=False):
@@ -288,6 +351,7 @@ class Player(QMainWindow):
     def save(self):
         self.cfg.setValue("positions", json.dumps(self.pos)); self.cfg.setValue("watched", json.dumps(list(self.watched)))
         self.cfg.setValue("volume", self.audio.volume())
+        self.cfg.setValue("yt_watched", json.dumps(list(self.yt_watched))); self.cfg.setValue("yt_titles", json.dumps(self.yt_titles))
     def cleanup(self):
         if self.tmp: self.mp.setSource(QUrl()); shutil.rmtree(self.tmp, ignore_errors=True); self.tmp = None
     def closeEvent(self, e):
