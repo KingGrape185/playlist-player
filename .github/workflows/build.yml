@@ -1,0 +1,56 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:        # lets you run it by hand from the Actions tab
+  push:
+    tags: ["v*"]            # pushing a tag like v1.0.1 also publishes a Release
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set version and update repo
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { $v = "1.0.0" }
+          (Get-Content player.py) `
+            -replace '__version__ = "[^"]*"', ('__version__ = "{0}"' -f $v) `
+            -replace 'UPDATE_REPO = ""', ('UPDATE_REPO = "{0}"' -f "${{ github.repository }}") |
+            Set-Content player.py
+          (Get-Content installer.iss) -replace '#define MyAppVersion "[^"]*"', ('#define MyAppVersion "{0}"' -f $v) |
+            Set-Content installer.iss
+
+      - name: Install dependencies
+        run: pip install pyqt6 pyqt6-webengine pyinstaller
+
+      - name: Build exe
+        run: pyinstaller --noconsole --onefile --icon icon.ico --add-data "icon.ico;." --name PlaylistPlayer player.py
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlaylistPlayer
+          path: |
+            installer/PlaylistPlayer-Setup.exe
+            dist/PlaylistPlayer.exe
+
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/PlaylistPlayer-Setup.exe
