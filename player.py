@@ -1,7 +1,7 @@
 import sys, os, re, json, random, zipfile, tempfile, shutil
 from pathlib import Path
-from PyQt6.QtCore import Qt, QUrl, QTimer, QSettings, QEvent
-from PyQt6.QtGui import QIcon, QShortcut, QKeySequence
+from PyQt6.QtCore import Qt, QUrl, QTimer, QSettings, QEvent, QSize
+from PyQt6.QtGui import QIcon, QShortcut, QKeySequence, QCursor, QPixmap
 from PyQt6.QtWidgets import *
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
@@ -44,6 +44,16 @@ QSlider::handle:horizontal{background:#fff;width:12px;height:12px;margin:-4px 0;
 QScrollBar:vertical{background:transparent;width:8px}
 QScrollBar::handle:vertical{background:#2a2a30;border-radius:4px;min-height:30px}
 QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0}
+QPushButton#play{background:#ff4b3e;color:#fff;border-radius:17px;min-width:34px;max-width:34px;min-height:34px;max-height:34px;font-size:14px;padding:0}
+QPushButton#play:hover{background:#ff6a5c}
+QPushButton#primary{background:#ff4b3e;color:#fff;padding:8px 24px;font-weight:600}
+QPushButton#primary:hover{background:#ff6a5c}
+QPushButton::menu-indicator{image:none;width:0}
+QMenu{background:#18181c;border:1px solid #26262c;border-radius:8px;padding:6px}
+QMenu::item{padding:7px 22px;border-radius:6px}
+QMenu::item:selected{background:#2a1715}
+QDialog{background:#131316}
+QToolTip{background:#18181c;color:#e9e9ec;border:1px solid #2a2a30;padding:4px 8px}
 """
 
 def fmt_views(n):
@@ -70,23 +80,50 @@ class ClickSlider(QSlider):
             self.setValue(int(v)); self.sliderMoved.emit(int(v))
         super().mousePressEvent(e)
 
+MINI_STYLE = """
+QWidget#mini{background:#000;border:1px solid #2a2a30}
+QWidget#bar{background:#0f0f11}
+QPushButton{background:transparent;border:none;border-radius:6px;padding:2px 7px;font-size:13px;min-width:22px;color:#d8d8dc}
+QPushButton:hover{background:#26262c}
+QSlider::groove:horizontal{height:3px;background:#2a2a30;border-radius:1px}
+QSlider::sub-page:horizontal{background:#ff4b3e;border-radius:1px}
+QSlider::handle:horizontal{background:#fff;width:9px;height:9px;margin:-3px 0;border-radius:4px}
+"""
+
+class DragBar(QWidget):
+    def __init__(self, p):
+        super().__init__(p); self.setObjectName("bar"); self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    def mousePressEvent(self, e):
+        wh = self.window().windowHandle()
+        if e.button() == Qt.MouseButton.LeftButton and wh: wh.startSystemMove()
+
 class Mini(QWidget):
-    """Small always-on-top window. The video (or YouTube view) is moved in here, so playback never restarts."""
+    """Slim frameless always-on-top window. The control bar only appears while the mouse is over it."""
     def __init__(self, o):
-        super().__init__(None, Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
+        super().__init__(None, Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
         self.o = o; self.surface = None
-        self.setWindowTitle("Mini player"); self.setWindowIcon(o.windowIcon()); self.setMinimumSize(300, 220)
-        self.lay = QVBoxLayout(self); self.lay.setContentsMargins(0, 0, 0, 0); self.lay.setSpacing(0)
+        self.setObjectName("mini"); self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True); self.setStyleSheet(MINI_STYLE)
+        self.setWindowTitle("Mini player"); self.setWindowIcon(o.windowIcon()); self.setMinimumSize(240, 150)
+        self.lay = QVBoxLayout(self); self.lay.setContentsMargins(1, 1, 1, 1); self.lay.setSpacing(0)
         def b(t, tip, f):
-            x = QPushButton(t); x.setToolTip(tip); x.clicked.connect(f); x.setFocusPolicy(Qt.FocusPolicy.NoFocus); x.setMinimumWidth(34); return x
+            x = QPushButton(t); x.setToolTip(tip); x.clicked.connect(f); x.setFocusPolicy(Qt.FocusPolicy.NoFocus); return x
         self.pb = b("▶", "Play / pause (Space)", o.mini_play)
         self.seek = ClickSlider(Qt.Orientation.Horizontal); self.seek.setFocusPolicy(Qt.FocusPolicy.NoFocus); self.seek.sliderMoved.connect(o.mp.setPosition)
-        bar = QWidget(); bar.setObjectName("controls"); h = QHBoxLayout(bar); h.setContentsMargins(8, 4, 8, 6); h.setSpacing(2)
+        self.bot = DragBar(self); h = QHBoxLayout(self.bot); h.setContentsMargins(6, 2, 2, 2); h.setSpacing(0)
         for w in (b("⏮", "Previous", o.prev), self.pb, b("⏭", "Next", o.next)): h.addWidget(w)
         h.addWidget(self.seek, 100); h.addStretch(1); h.addWidget(b("⤢", "Back to full player (I / Esc)", o.mini_toggle))
-        self.lay.addWidget(bar)
+        h.addWidget(QSizeGrip(self), 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+        self.lay.addWidget(self.bot); self.bot.hide()
+        self.hover = QTimer(self); self.hover.setInterval(250); self.hover.timeout.connect(self.check_hover)
         for k, f in {"Space": o.mini_play, "I": o.mini_toggle, "Esc": o.mini_toggle, "Left": lambda: o.skip(-5), "Right": lambda: o.skip(5)}.items():
             QShortcut(QKeySequence(k), self, activated=f)
+    def check_hover(self):
+        self.bot.setVisible(self.geometry().contains(QCursor.pos()) or self.seek.isSliderDown())
+    def showEvent(self, e): self.hover.start(); super().showEvent(e)
+    def hideEvent(self, e): self.hover.stop(); super().hideEvent(e)
+    def mousePressEvent(self, e):
+        wh = self.windowHandle()
+        if e.button() == Qt.MouseButton.LeftButton and wh: wh.startSystemMove()
     def closeEvent(self, e):
         e.ignore(); self.o.mini_toggle()
 
@@ -94,6 +131,7 @@ class Player(QMainWindow):
     update_found = pyqtSignal(str, str)
     title_found = pyqtSignal(str, str, str)
     stats_found = pyqtSignal(str)
+    thumb_found = pyqtSignal(str)
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Playlist Player"); self.setAcceptDrops(True)
@@ -103,6 +141,8 @@ class Player(QMainWindow):
         self.repeat = 0
         self.yt_watched = set(json.loads(self.cfg.value("yt_watched", "[]"))); self.yt_titles = json.loads(self.cfg.value("yt_titles", "{}")); self.yt_stats = json.loads(self.cfg.value("yt_stats", "{}"))
         self.yt_ids = []; self.yt_cur = -1; self.yt_pid = ""; self._was_fs = False; self.yt_failed = set()
+        self.yt_pos = json.loads(self.cfg.value("yt_pos", "{}")); self.yt_last_t = 0; self.yt_first = False
+        self.thumb_dir = str(Path.home() / ".playlistplayer" / "thumbs"); os.makedirs(self.thumb_dir, exist_ok=True)
         self.yt_timer = QTimer(interval=1000); self.yt_timer.timeout.connect(self.yt_poll)
         self.audio = QAudioOutput(); self.mp = QMediaPlayer(); self.mp.setAudioOutput(self.audio)
         self.audio.setVolume(float(self.cfg.value("volume", 0.8)))
@@ -114,23 +154,24 @@ class Player(QMainWindow):
         self.search = QLineEdit(); self.search.setPlaceholderText("Search playlist…"); self.search.textChanged.connect(self.filter)
         self.list = QListWidget(); self.list.itemDoubleClicked.connect(lambda it: self.play(it.data(Qt.ItemDataRole.UserRole)))
         self.info = QLabel("Drop a folder or .zip here"); self.info.setWordWrap(True)
-        openb = QPushButton("Open folder"); openb.clicked.connect(self.open_folder)
-        zipb = QPushButton("Open zip"); zipb.clicked.connect(self.open_zip)
-        self.ytb = QPushButton("▶ YouTube mode (counts views)"); self.ytb.setCheckable(True); self.ytb.clicked.connect(self.yt_toggle)
-        minib = QPushButton("◱  Mini player (I)"); minib.clicked.connect(self.mini_toggle)
-        keyb = QPushButton("YouTube API key…"); keyb.setToolTip("Optional: reliable views / upload dates"); keyb.clicked.connect(self.set_key)
-        updb = QPushButton(f"Check for updates (v{__version__})"); updb.clicked.connect(lambda: self.check_update(True))
-        row = QHBoxLayout(); row.addWidget(openb); row.addWidget(zipb)
+        openb = QPushButton("📁  Open folder"); openb.clicked.connect(self.open_folder)
+        more = QPushButton("⋯"); more.setToolTip("More"); mm = QMenu(self)
+        mm.addAction("Open zip…", self.open_zip); mm.addAction("YouTube API key…", self.set_key)
+        mm.addAction(f"Check for updates (v{__version__})", lambda: self.check_update(True)); more.setMenu(mm)
+        self.ytb = QPushButton("▶  YouTube mode"); self.ytb.setToolTip("Plays in YouTube's official player, so views count"); self.ytb.setCheckable(True); self.ytb.clicked.connect(self.yt_toggle)
+        minib = QPushButton("◱  Mini"); minib.setToolTip("Mini player (I)"); minib.clicked.connect(self.mini_toggle)
+        row = QHBoxLayout(); row.addWidget(openb, 1); row.addWidget(more)
+        row2 = QHBoxLayout(); row2.addWidget(self.ytb, 1); row2.addWidget(minib)
         side = QWidget(); sl = QVBoxLayout(side); sl.setContentsMargins(12, 12, 12, 12); sl.setSpacing(8)
-        self.ytlist = QListWidget(); self.ytlist.hide(); self.ytlist.itemDoubleClicked.connect(self.yt_play_item)
+        self.ytlist = QListWidget(); self.ytlist.setIconSize(QSize(112, 63)); self.ytlist.setWordWrap(True); self.ytlist.hide(); self.ytlist.itemDoubleClicked.connect(self.yt_play_item)
         self.head = QLabel("Local files"); self.head.setObjectName("head")
         for w in (self.head, self.search, self.list, self.ytlist, self.info): sl.addWidget(w)
-        sl.addLayout(row); sl.addWidget(self.ytb); sl.addWidget(minib); sl.addWidget(keyb); sl.addWidget(updb); side.setMinimumWidth(260); self.side = side
+        sl.addLayout(row); sl.addLayout(row2); side.setMinimumWidth(300); self.side = side
 
         # controls
         def btn(t, tip, f, chk=False):
             b = QPushButton(t); b.setToolTip(tip); b.clicked.connect(f); b.setCheckable(chk); b.setFocusPolicy(Qt.FocusPolicy.NoFocus); b.setMinimumWidth(38); return b
-        self.pbtn = btn("▶", "Play/Pause (Space)", self.toggle)
+        self.pbtn = btn("▶", "Play/Pause (Space)", self.toggle); self.pbtn.setObjectName("play")
         self.seek = ClickSlider(Qt.Orientation.Horizontal); self.seek.sliderMoved.connect(self.mp.setPosition); self.seek.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.time = QLabel("0:00 / 0:00")
         self.speed = QComboBox(); self.speed.addItems([f"{s}x" for s in SPEEDS]); self.speed.setCurrentIndex(SPEEDS.index(float(self.cfg.value("speed", 1.0))))
@@ -175,10 +216,11 @@ class Player(QMainWindow):
         g = self.cfg.value("geometry")
         if g: self.restoreGeometry(g)
         else: self.resize(1280, 760)
-        self.update_found.connect(self.on_update); self.title_found.connect(self.on_title); self.stats_found.connect(self.on_stats); QTimer.singleShot(4000, self.check_update)
+        self.update_found.connect(self.on_update); self.title_found.connect(self.on_title); self.stats_found.connect(self.on_stats); self.thumb_found.connect(self.on_thumb); QTimer.singleShot(4000, self.check_update)
         last = self.cfg.value("source")
         if last and os.path.isdir(last): self.load_dir(last)
         elif len(sys.argv) > 1: self.load_path(sys.argv[1])
+        if self.cfg.value("mode") == "yt" and self.cfg.value("yt_pl") and QWebEngineView is not None: QTimer.singleShot(500, self.yt_resume)
 
     # ---- loading
     def open_folder(self):
@@ -283,10 +325,14 @@ class Player(QMainWindow):
             self.yt_off(); return
         if QWebEngineView is None:
             self.ytb.setChecked(False); QMessageBox.warning(self, "Missing", "Install PyQt6-WebEngine (build.bat does this)."); return
-        t, ok = QInputDialog.getText(self, "YouTube playlist", "Playlist URL or ID:", text=self.cfg.value("yt_pl", YT_PLAYLIST))
-        t = t.strip() if ok else ""
+        rec = json.loads(self.cfg.value("yt_recent", json.dumps([YT_PLAYLIST]))); base = "https://www.youtube.com/playlist?list="
+        t = self.ask("Add a YouTube playlist", "Paste a playlist link (or just its ID). It plays in YouTube's own player, so views still count.",
+                     base + self.cfg.value("yt_pl", YT_PLAYLIST), [base + x for x in rec], base + "…") or ""
         m = re.search(r"list=([\w-]+)", t); pid = m.group(1) if m else (t if re.fullmatch(r"[\w-]+", t) else None)
         if not pid: self.ytb.setChecked(False); return
+        if pid in rec: rec.remove(pid)
+        rec.insert(0, pid); self.cfg.setValue("yt_recent", json.dumps(rec[:8])); self.yt_enter(pid)
+    def yt_enter(self, pid):
         self.cfg.setValue("yt_pl", pid); self.mp.pause()
         if not self.web:
             prof = QWebEngineProfile("ytplayer", self)   # persistent: stays signed in between launches
@@ -297,6 +343,39 @@ class Player(QMainWindow):
             self.web = QWebEngineView(); self.web.setPage(page); self.stack.addWidget(self.web)
         self.yt_start(pid)
         self.stack.setCurrentWidget(self.web); self.controls.hide()
+    def yt_resume(self): self.ytb.setChecked(True); self.yt_enter(self.cfg.value("yt_pl"))
+    def ask(self, title, label, text="", items=None, ph=""):
+        d = QDialog(self); d.setWindowTitle(title); d.setMinimumWidth(680)
+        lay = QVBoxLayout(d); lay.setContentsMargins(26, 24, 26, 20); lay.setSpacing(12)
+        h = QLabel(title); h.setObjectName("head"); l = QLabel(label); l.setWordWrap(True); l.setObjectName("nowMeta"); lay.addWidget(h); lay.addWidget(l)
+        if items: w = QComboBox(); w.setEditable(True); w.addItems(items); w.setCurrentText(text); le = w.lineEdit()
+        else: w = le = QLineEdit(text)
+        le.setPlaceholderText(ph); w.setMinimumHeight(40); lay.addWidget(w)
+        row = QHBoxLayout(); paste = QPushButton("Paste from clipboard"); paste.clicked.connect(lambda: le.setText(QApplication.clipboard().text().strip()))
+        ok = QPushButton("OK"); ok.setObjectName("primary"); ok.setDefault(True); ok.clicked.connect(d.accept)
+        cancel = QPushButton("Cancel"); cancel.clicked.connect(d.reject)
+        row.addWidget(paste); row.addStretch(1); row.addWidget(cancel); row.addWidget(ok); lay.addSpacing(6); lay.addLayout(row)
+        le.selectAll(); le.setFocus()
+        return le.text().strip() if d.exec() else None
+
+    def yt_thumbs(self, ids):
+        from concurrent.futures import ThreadPoolExecutor
+        def one(v):
+            f = os.path.join(self.thumb_dir, v + ".jpg")
+            if not os.path.exists(f):
+                try:
+                    data = urllib.request.urlopen(urllib.request.Request(f"https://i.ytimg.com/vi/{v}/mqdefault.jpg", headers={"User-Agent": "Mozilla/5.0"}), timeout=10).read()
+                    open(f, "wb").write(data)
+                except Exception: return
+            self.thumb_found.emit(v)
+        with ThreadPoolExecutor(6) as ex: list(ex.map(one, ids))
+    def on_thumb(self, v):
+        pm = QPixmap(os.path.join(self.thumb_dir, v + ".jpg"))
+        if pm.isNull(): return
+        ic = QIcon(pm)
+        for k, x in enumerate(self.yt_ids):
+            it = self.ytlist.item(k) if x == v else None
+            if it: it.setIcon(ic)
 
     # ---- YouTube playlist sidebar (playback stays in YouTube's official player)
     PAGE = """<html><head><style>html,body,#p{margin:0;height:100%;background:#000}</style></head><body><div id="p"></div>
@@ -305,13 +384,15 @@ class Player(QMainWindow):
 var p;
 function onYouTubeIframeAPIReady(){
   p=new YT.Player('p',{width:'100%',height:'100%',playerVars:{autoplay:1,rel:0},
-    events:{onReady:function(){p.loadPlaylist({listType:'playlist',list:'__PID__',index:__START__});}}});
+    events:{onReady:function(){p.loadPlaylist({listType:'playlist',list:'__PID__',index:__START__,startSeconds:__TS__});}}});
 }
 </script></body></html>"""
     def yt_start(self, pid):
         self.yt_pid = pid; self.yt_ids = []; self.yt_cur = -1
-        start = int(self.cfg.value("yt_idx", 0)) if self.cfg.value("yt_idx_for") == pid else 0
-        self.web.setHtml(self.PAGE.replace("__PID__", pid).replace("__START__", str(start)), QUrl("https://playlist-player.app/"))
+        same = self.cfg.value("yt_idx_for") == pid
+        start = int(self.cfg.value("yt_idx", 0)) if same else 0; ts = max(0, int(float(self.cfg.value("yt_time", 0))) - 3) if same else 0
+        self.yt_first = True; self.yt_last_t = 0
+        self.web.setHtml(self.PAGE.replace("__PID__", pid).replace("__START__", str(start)).replace("__TS__", str(ts)), QUrl("https://playlist-player.app/"))
         self.ytlist.clear(); self.list.hide(); self.ytlist.show(); self.search.clear(); self.info.setText("Loading playlist…"); self.head.setText("YouTube playlist")
         self.yt_timer.start()
     def yt_off(self):
@@ -321,7 +402,7 @@ function onYouTubeIframeAPIReady(){
     def yt_cmd(self, js):
         if self.web: self.web.page().runJavaScript(js)
     def yt_poll(self):
-        if self.web: self.web.page().runJavaScript("(window.p&&p.getPlaylist&&p.getPlaylist())?JSON.stringify({ids:p.getPlaylist(),i:p.getPlaylistIndex(),s:p.getPlayerState()}):''", self.yt_got)
+        if self.web: self.web.page().runJavaScript("(window.p&&p.getPlaylist&&p.getPlaylist())?JSON.stringify({ids:p.getPlaylist(),i:p.getPlaylistIndex(),s:p.getPlayerState(),t:p.getCurrentTime()}):''", self.yt_got)
     def yt_got(self, r):
         if not r: return
         d = json.loads(r); ids = d.get("ids") or []
@@ -332,13 +413,20 @@ function onYouTubeIframeAPIReady(){
             for k in range(len(ids)): self.yt_label(k)
             todo = [v for v in dict.fromkeys(ids) if v not in self.yt_titles]
             if todo: threading.Thread(target=self.yt_fetch_titles, args=(todo,), daemon=True).start()
+            threading.Thread(target=self.yt_thumbs, args=(list(dict.fromkeys(ids)),), daemon=True).start()
             threading.Thread(target=self.yt_crawl, args=(list(dict.fromkeys(ids)), self.cfg.value("yt_key", "")), daemon=True).start()
         i = d.get("i")
         if ids and i is not None and 0 <= i < len(ids):
+            v, t, st_ = ids[i], d.get("t") or 0, d.get("s")
+            if st_ == 0: self.yt_pos.pop(v, None)
+            elif st_ in (1, 2) and i == self.yt_cur and t > 5: self.yt_pos[v] = t; self.yt_last_t = t
             if d.get("s") == 0 and ids[i] not in self.yt_watched: self.yt_watched.add(ids[i]); self.yt_label(i)
             if i != self.yt_cur:
                 self.yt_cur = i; self.ytlist.setCurrentRow(i); self.cfg.setValue("yt_idx", i); self.cfg.setValue("yt_idx_for", self.yt_pid)
                 self.info.setText(f"{i+1} of {len(ids)} · {sum(x in self.yt_watched for x in ids)} watched")
+                self.yt_last_t = 0; saved = self.yt_pos.get(v, 0)
+                if self.yt_first: self.yt_first = False
+                elif saved > 10: self.yt_cmd(f"p.seekTo({saved},true)")      # jump back to where you left that video
                 self.yt_show(ids[i]); threading.Thread(target=self.yt_stat_one, args=(ids[i], 3600, self.cfg.value("yt_key", "")), daemon=True).start()
     def yt_label(self, k):
         it = self.ytlist.item(k)
@@ -380,8 +468,8 @@ function onYouTubeIframeAPIReady(){
             self.now_meta.setText(f"Local file  ·  {os.path.getsize(f)/1e6:.0f} MB  ·  {self.idx+1} of {len(self.files)}")
         else: self.now_title.setText("Nothing playing"); self.now_meta.setText("Open a folder, or switch on YouTube mode")
     def set_key(self):
-        t, ok = QInputDialog.getText(self, "YouTube API key", "Paste a YouTube Data API v3 key (empty = remove):", text=self.cfg.value("yt_key", ""))
-        if not ok: return
+        t = self.ask("YouTube API key", "Optional. Paste a YouTube Data API v3 key for reliable views and upload dates. Leave it empty to remove the key.", self.cfg.value("yt_key", ""), None, "AIza…")
+        if t is None: return
         self.cfg.setValue("yt_key", t.strip()); self.yt_failed.clear()
         self.yt_stats = {k: {**x, "t": 0} for k, x in dict(self.yt_stats).items()}
         QMessageBox.information(self, "Saved", "Turn YouTube mode off and on again to refresh the stats.")
@@ -442,16 +530,16 @@ function onYouTubeIframeAPIReady(){
         m = self.mini
         if m.isVisible():                      # back to the full player
             w = m.surface; m.lay.removeWidget(w); self.stack.addWidget(w); self.stack.setCurrentWidget(w)
-            self.cfg.setValue("mini_geo", m.saveGeometry()); m.surface = None; m.hide()
+            self.cfg.setValue("mini_geo2", m.saveGeometry()); m.surface = None; m.hide()
             self.showNormal(); self.raise_(); self.activateWindow()
         else:                                  # shrink into the mini player
             if self.isFullScreen(): self.exit_fs()
             yt = self.ytb.isChecked(); w = self.web if yt else self.video
             self.stack.removeWidget(w); m.lay.insertWidget(0, w, 1); w.show(); m.surface = w
             m.seek.setVisible(not yt); m.pb.setText("⏯" if yt else self.pbtn.text())
-            g = self.cfg.value("mini_geo")
+            g = self.cfg.value("mini_geo2")
             if g: m.restoreGeometry(g)
-            else: m.resize(440, 300)
+            else: m.resize(380, 232)
             m.show(); m.raise_(); m.activateWindow(); self.showMinimized()
     def yt_fs(self, r):
         if self.mini.isVisible(): r.reject(); return
@@ -524,6 +612,8 @@ function onYouTubeIframeAPIReady(){
         self.cfg.setValue("positions", json.dumps(self.pos)); self.cfg.setValue("watched", json.dumps(list(self.watched)))
         self.cfg.setValue("volume", self.audio.volume())
         self.cfg.setValue("yt_watched", json.dumps(list(self.yt_watched))); self.cfg.setValue("yt_titles", json.dumps(self.yt_titles)); self.cfg.setValue("yt_stats", json.dumps(dict(self.yt_stats)))
+        self.cfg.setValue("yt_pos", json.dumps(dict(self.yt_pos))); self.cfg.setValue("yt_time", self.yt_last_t)
+        self.cfg.setValue("mode", "yt" if self.ytb.isChecked() else "local")
     def cleanup(self):
         if self.tmp: self.mp.setSource(QUrl()); shutil.rmtree(self.tmp, ignore_errors=True); self.tmp = None
     def closeEvent(self, e):
@@ -532,7 +622,7 @@ function onYouTubeIframeAPIReady(){
         self.save(); self.cfg.setValue("geometry", self.saveGeometry()); self.cleanup(); super().closeEvent(e)
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv); app.setStyleSheet(STYLE)
+    app = QApplication(sys.argv); app.setStyle("Fusion"); app.setStyleSheet(STYLE)
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     app.setWindowIcon(QIcon(os.path.join(base, "icon.ico")))
     w = Player(); w.show(); sys.exit(app.exec())
