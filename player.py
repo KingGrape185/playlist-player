@@ -5,7 +5,7 @@ from PyQt6.QtGui import QIcon, QShortcut, QKeySequence, QCursor, QPixmap, QColor
 from PyQt6.QtWidgets import *
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
-import threading, subprocess, urllib.request, time
+import threading, subprocess, urllib.request, urllib.error, time
 from PyQt6.QtCore import pyqtSignal
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -187,6 +187,8 @@ class Player(QMainWindow):
     title_found = pyqtSignal(str, str, str)
     stats_found = pyqtSignal(str)
     thumb_found = pyqtSignal(str)
+    dl_progress = pyqtSignal(int)
+    dl_done = pyqtSignal(str)
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Playlist Player"); self.setAcceptDrops(True)
@@ -212,7 +214,7 @@ class Player(QMainWindow):
         openb = QPushButton("📁  Open folder"); openb.clicked.connect(self.open_folder)
         more = QPushButton("⋯"); more.setToolTip("More"); mm = QMenu(self)
         mm.addAction("Appearance & settings…", self.open_settings); mm.addAction("Open zip…", self.open_zip); mm.addAction("Clear extracted zips", self.clear_zips); mm.addAction("YouTube API key…", self.set_key)
-        mm.addAction(f"Check for updates (v{__version__})", lambda: self.check_update(True)); more.setMenu(mm)
+        mm.addAction(f"Check for updates (v{__version__})", lambda: self.check_update(True)); mm.addAction("Update source (GitHub repo)…", self.set_update_repo); more.setMenu(mm)
         self.ytb = QPushButton("▶  YouTube mode"); self.ytb.setToolTip("Plays in YouTube's official player, so views count"); self.ytb.setCheckable(True); self.ytb.clicked.connect(self.yt_toggle)
         minib = QPushButton("◱  Mini"); minib.setToolTip("Mini player (I)"); minib.clicked.connect(self.mini_toggle)
         row = QHBoxLayout(); row.addWidget(openb, 1); row.addWidget(more)
@@ -271,7 +273,7 @@ class Player(QMainWindow):
         g = self.cfg.value("geometry")
         if g: self.restoreGeometry(g)
         else: self.resize(1280, 760)
-        self.update_found.connect(self.on_update); self.title_found.connect(self.on_title); self.stats_found.connect(self.on_stats); self.thumb_found.connect(self.on_thumb); QTimer.singleShot(4000, self.check_update); self.layout_side(); self.apply_opts()
+        self.update_found.connect(self.on_update); self.title_found.connect(self.on_title); self.stats_found.connect(self.on_stats); self.thumb_found.connect(self.on_thumb); self.dl_progress.connect(self.on_dl_progress); self.dl_done.connect(self.on_dl_done); QTimer.singleShot(4000, self.check_update); self.layout_side(); self.apply_opts()
         last = self.cfg.value("source")
         if last and os.path.isdir(last): self.load_dir(last)
         elif len(sys.argv) > 1: self.load_path(sys.argv[1])
@@ -681,31 +683,65 @@ function onYouTubeIframeAPIReady(){
         super().changeEvent(e)
 
     # ---- updater (GitHub Releases)
+    def update_repo(self): return (self.cfg.value("update_repo", "") or UPDATE_REPO).strip()
+    def set_update_repo(self):
+        t = self.ask("Update source", "The GitHub repository that hosts your releases, written as owner/name (for example yourname/playlist-player). It must be public.", self.update_repo(), None, "owner/name")
+        if t is None: return False
+        t = re.sub(r"^https?://github\.com/", "", t).strip("/ ")
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", t): QMessageBox.warning(self, "Updates", "That doesn't look like owner/name."); return False
+        self.cfg.setValue("update_repo", t); return True
     def check_update(self, manual=False):
-        if not UPDATE_REPO:
-            if manual: QMessageBox.information(self, "Updates", "Set UPDATE_REPO in player.py to your GitHub owner/repo first.")
-            return
+        repo = self.update_repo()
+        if not repo:
+            if not manual or not self.set_update_repo(): return
+            repo = self.update_repo()
         def work():
             try:
-                rq = urllib.request.Request(f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest", headers={"User-Agent": "PlaylistPlayer"})
-                d = json.load(urllib.request.urlopen(rq, timeout=10))
-                tag = d["tag_name"].lstrip("v")
-                url = next(a["browser_download_url"] for a in d["assets"] if a["name"].lower().endswith("setup.exe"))
-                newer = tuple(map(int, tag.split("."))) > tuple(map(int, __version__.split(".")))
-                self.update_found.emit(tag if newer else "", url if newer else ("manual" if manual else ""))
-            except Exception:
-                if manual: self.update_found.emit("", "error")
+                rq = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases/latest", headers={"User-Agent": "PlaylistPlayer", "Accept": "application/vnd.github+json"})
+                d = json.load(urllib.request.urlopen(rq, timeout=15)); tag = d.get("tag_name", "")
+                m = re.search(r"\d+(?:\.\d+)*", tag)
+                if not m: raise RuntimeError(f"The latest release is tagged '{tag}', which has no version number.")
+                newer = tuple(map(int, m.group(0).split("."))) > tuple(map(int, __version__.split(".")))
+                exes = [a for a in d.get("assets", []) if a["name"].lower().endswith(".exe")]
+                a = next((x for x in exes if "setup" in x["name"].lower()), exes[0] if exes else None)
+                if newer and not a: raise RuntimeError(f"Release {tag} has no installer (.exe) attached.")
+                self.update_found.emit(m.group(0) if newer else "", a["browser_download_url"] if newer else ("manual" if manual else ""))
+            except urllib.error.HTTPError as e:
+                msg = {404: f"No published release found in {repo}. The repository must be public and have a release with the installer attached.",
+                       403: "GitHub is rate-limiting this PC. Try again in a few minutes."}.get(e.code, f"GitHub returned error {e.code}.")
+                if manual: self.update_found.emit("", "error:" + msg)
+            except Exception as e:
+                if manual: self.update_found.emit("", "error:" + (str(e) if isinstance(e, RuntimeError) else "Couldn't reach GitHub. Check your internet connection."))
         threading.Thread(target=work, daemon=True).start()
     def on_update(self, tag, url):
-        if url == "error": QMessageBox.warning(self, "Updates", "Couldn't check for updates."); return
+        if url.startswith("error:"): QMessageBox.warning(self, "Updates", url[6:]); return
         if not tag:
             if url == "manual": QMessageBox.information(self, "Updates", f"You're up to date (v{__version__}).")
             return
-        if QMessageBox.question(self, "Update available", f"Version {tag} is available. Install now?") != QMessageBox.StandardButton.Yes: return
-        self.setCursor(Qt.CursorShape.WaitCursor); dest = os.path.join(tempfile.gettempdir(), "PlaylistPlayer-Setup.exe")
-        try: urllib.request.urlretrieve(url, dest)
-        except Exception: self.unsetCursor(); QMessageBox.warning(self, "Updates", "Download failed."); return
-        subprocess.Popen([dest, "/SILENT", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"]); QApplication.quit()
+        if QMessageBox.question(self, "Update available", f"Version {tag} is available (you have v{__version__}).\n\nDownload and install it now? The app will close and reopen by itself.") != QMessageBox.StandardButton.Yes: return
+        self.dlg = QProgressDialog("Downloading update…", None, 0, 100, self); self.dlg.setWindowTitle("Updating Playlist Player")
+        self.dlg.setWindowModality(Qt.WindowModality.WindowModal); self.dlg.setMinimumDuration(0); self.dlg.setValue(0)
+        dest = os.path.join(tempfile.gettempdir(), "PlaylistPlayer-Setup.exe")
+        def work():
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "PlaylistPlayer"}), timeout=30) as r, open(dest, "wb") as f:
+                    total = int(r.headers.get("Content-Length") or 0); got = 0
+                    while True:
+                        b = r.read(1 << 16)
+                        if not b: break
+                        f.write(b); got += len(b)
+                        if total: self.dl_progress.emit(int(got * 100 / total))
+                self.dl_done.emit(dest)
+            except Exception: self.dl_done.emit("")
+        threading.Thread(target=work, daemon=True).start()
+    def on_dl_progress(self, p):
+        if getattr(self, "dlg", None): self.dlg.setValue(p)
+    def on_dl_done(self, path):
+        if getattr(self, "dlg", None): self.dlg.close(); self.dlg = None
+        if not path: QMessageBox.warning(self, "Updates", "The download failed. Please try again."); return
+        self.save()
+        subprocess.Popen([path, "/SILENT", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        QApplication.quit()
 
     # ---- UI
     def flash(self, t):
