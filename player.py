@@ -814,17 +814,20 @@ function onYouTubeIframeAPIReady(){
             repo = self.update_repo()
         def work():
             try:
-                rq = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases/latest", headers={"User-Agent": "PlaylistPlayer", "Accept": "application/vnd.github+json"})
-                d = json.load(urllib.request.urlopen(rq, timeout=15)); tag = d.get("tag_name", "")
-                m = re.search(r"\d+(?:\.\d+)*", tag)
-                if not m: raise RuntimeError(f"The latest release is tagged '{tag}', which has no version number.")
-                newer = tuple(map(int, m.group(0).split("."))) > tuple(map(int, __version__.split(".")))
-                exes = [a for a in d.get("assets", []) if a["name"].lower().endswith(".exe")]
-                a = next((x for x in exes if "setup" in x["name"].lower()), exes[0] if exes else None)
-                if newer and not a: raise RuntimeError(f"Release {tag} has no installer (.exe) attached.")
-                self.update_found.emit(m.group(0) if newer else "", a["browser_download_url"] if newer else ("manual" if manual else ""))
+                rq = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases?per_page=15", headers={"User-Agent": "PlaylistPlayer", "Accept": "application/vnd.github+json"})
+                best = None
+                for d in json.load(urllib.request.urlopen(rq, timeout=15)):
+                    if d.get("draft"): continue
+                    m = re.search(r"\d+(?:\.\d+)*", d.get("tag_name", ""))
+                    exes = [x for x in d.get("assets", []) if x["name"].lower().endswith(".exe")]
+                    if not m or not exes: continue
+                    ver = tuple(map(int, m.group(0).split(".")))
+                    if best is None or ver > best[0]: best = (ver, m.group(0), next((x for x in exes if "setup" in x["name"].lower()), exes[0]))
+                if best is None: raise RuntimeError(f"No release with an installer (.exe) was found in {repo}. Run the build workflow, then check the repo's Releases page.")
+                newer = best[0] > tuple(map(int, __version__.split(".")))
+                self.update_found.emit(best[1] if newer else "", best[2]["browser_download_url"] if newer else ("manual" if manual else ""))
             except urllib.error.HTTPError as e:
-                msg = {404: f"No published release found in {repo}. The repository must be public and have a release with the installer attached.",
+                msg = {404: f"GitHub can't find {repo}. Check the name is exactly right and that the repository is public.",
                        403: "GitHub is rate-limiting this PC. Try again in a few minutes."}.get(e.code, f"GitHub returned error {e.code}.")
                 if manual: self.update_found.emit("", "error:" + msg)
             except Exception as e:
