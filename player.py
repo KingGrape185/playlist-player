@@ -2,6 +2,11 @@ import sys, os, re, json, random, zipfile, tempfile, shutil
 from pathlib import Path
 from PyQt6.QtCore import Qt, QUrl, QTimer, QSettings, QEvent, QSize, QRect, QRectF
 from PyQt6.QtGui import QIcon, QShortcut, QKeySequence, QCursor, QPixmap, QColor, QFont, QPainter, QPainterPath, QFontMetrics, QPalette
+from PyQt6.QtCore import QPointF
+try:
+    from PyQt6.QtSvg import QSvgRenderer
+except Exception:
+    QSvgRenderer = None
 from PyQt6.QtWidgets import *
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
@@ -64,6 +69,12 @@ QMenu::item{padding:8px 24px;border-radius:8px}
 QMenu::item:selected{background:@@hover@@}
 QDialog{background:@@bg@@}
 QToolTip{background:@@surface@@;color:@@text@@;border:1px solid @@groove@@;padding:4px 8px}
+QPushButton#icon:checked{background:transparent}
+QLabel#time{color:@@muted@@;font-size:13px;margin-left:10px}
+QLabel#welcomeTitle{font-size:28px;font-weight:700}
+QLabel#empty{color:@@muted@@;font-size:13px;padding:24px}
+QComboBox#speed{background:@@surface@@;border:none;border-radius:16px;padding:6px 14px;font-weight:600;min-width:34px}
+QComboBox#speed::drop-down{width:0;border:none}
 """
 
 DEFAULTS = dict(preset="YouTube Dark", bg="#0f0f0f", text="#f1f1f1", accent="#ff0000", font="Segoe UI", size=13, radius=8,
@@ -163,12 +174,95 @@ def fmt(ms):
     s = max(0, int(ms // 1000)); h, r = divmod(s, 3600); m, s = divmod(r, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
+ICONS = {
+ "play": "M8 5v14l11-7z",
+ "pause": "M6 19h4V5H6v14zm8-14v14h4V5h-4z",
+ "next": "M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z",
+ "prev": "M6 6h2v12H6zm3.5 6l8.5 6V6z",
+ "vol": "M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z",
+ "vol_off": "M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z",
+ "fs": "M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z",
+ "fs_exit": "M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z",
+ "search": "M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z",
+ "settings": "M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z",
+ "more": "M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z",
+ "folder": "M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z",
+ "pip": "M19 7h-8v6h8V7zm2-4H3c-1.1 0-2 .9-2 2v14c0 1.1.9 1.98 2 1.98h18c1.1 0 2-.88 2-1.98V5c0-1.1-.9-2-2-2zm0 16.01H3V4.98h18v14.03z",
+ "shuffle": "M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z",
+ "repeat": "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z",
+ "repeat_one": "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z",
+ "sleep": "M12 3c-4.97 0-9 4.03-9 9s4.03 9 9 9 9-4.03 9-9c0-.46-.04-.92-.1-1.36-.98 1.37-2.58 2.26-4.4 2.26-2.98 0-5.4-2.42-5.4-5.4 0-1.81.89-3.42 2.26-4.4-.44-.06-.9-.1-1.36-.1z",
+ "ff": "M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z",
+ "playlist": "M19 9H2v2h17V9zm0-4H2v2h17V5zM2 15h13v-2H2v2zm15-2v6l5-3-5-3z",
+ "restore": "M21 11V3h-8l3.29 3.29-10 10L3 13v8h8l-3.29-3.29 10-10z",
+}
+GLYPH = {"▶": "play", "⏸": "pause", "⏯": "play", "⏮": "prev", "⏭": "next", "⤢": "restore", "⛶": "fs_exit"}
+FALLBACK = {"play": "▶", "pause": "⏸", "prev": "⏮", "next": "⏭", "restore": "⤢", "fs_exit": "⛶", "fs": "⛶", "search": "⌕", "settings": "⚙", "more": "⋯", "folder": "📁", "pip": "◱"}
+
+def svg_pm(name, color, size):
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="{color.name()}" d="{ICONS[name]}"/></svg>'.encode()
+    pm = QPixmap(size * 2, size * 2); pm.fill(Qt.GlobalColor.transparent); pm.setDevicePixelRatio(2)
+    p = QPainter(pm); QSvgRenderer(svg).render(p, QRectF(0, 0, size, size)); p.end()
+    return pm
+
+class IconBtn(QPushButton):
+    """Button with a crisp vector icon that follows the theme (accent colour when checked)."""
+    ALL = []
+    def __init__(self, name, tip="", size=20, ckey="text", on_key="accent", text=""):
+        super().__init__(text)
+        self.name, self.isz, self.ckey, self.on_key, self._label = name, size, ckey, on_key, text
+        self.setToolTip(tip); self.setFocusPolicy(Qt.FocusPolicy.NoFocus); self.setCursor(Qt.CursorShape.PointingHandCursor); self.setIconSize(QSize(size, size))
+        IconBtn.ALL.append(self); self.refresh()
+    def set_name(self, n):
+        if n != self.name: self.name = n; self.refresh()
+    def setText(self, t):
+        n = GLYPH.get(t)
+        if n: self.set_name(n)
+        else: self._label = t; super().setText(t)
+    def text(self):
+        t = super().text()
+        return t or ("⏸" if self.name == "pause" else "▶")
+    def refresh(self):
+        if QSvgRenderer is None:
+            if not self._label: super().setText(FALLBACK.get(self.name, "•"))
+            return
+        ic = QIcon()
+        ic.addPixmap(svg_pm(self.name, QColor(PAL.get(self.ckey, "#ffffff")), self.isz), QIcon.Mode.Normal, QIcon.State.Off)
+        ic.addPixmap(svg_pm(self.name, QColor(PAL.get(self.on_key, "#ff0000")), self.isz), QIcon.Mode.Normal, QIcon.State.On)
+        self.setIcon(ic)
+
 class ClickSlider(QSlider):
+    """Flat YouTube-style slider: thin track that thickens on hover, red fill, round knob on hover."""
+    def __init__(self, *a):
+        super().__init__(*a); self.setMouseTracking(True); self._hov = False; self.setFixedHeight(20)
+    def _val(self, x): return int(self.minimum() + (self.maximum() - self.minimum()) * min(max(x / max(1, self.width()), 0.0), 1.0))
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
-            v = self.minimum() + (self.maximum() - self.minimum()) * e.position().x() / self.width()
-            self.setValue(int(v)); self.sliderMoved.emit(int(v))
-        super().mousePressEvent(e)
+            self.setSliderDown(True); v = self._val(e.position().x()); self.setValue(v); self.sliderMoved.emit(v)
+    def mouseMoveEvent(self, e):
+        if self.isSliderDown(): v = self._val(e.position().x()); self.setValue(v); self.sliderMoved.emit(v)
+    def mouseReleaseEvent(self, e):
+        if self.isSliderDown(): self.setSliderDown(False)
+    def enterEvent(self, e): self._hov = True; self.update(); super().enterEvent(e)
+    def leaveEvent(self, e): self._hov = False; self.update(); super().leaveEvent(e)
+    def paintEvent(self, e):
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing); big = self._hov or self.isSliderDown()
+        h = 6 if big else 4; y = (self.height() - h) / 2; w = self.width(); span = max(1, self.maximum() - self.minimum())
+        frac = (self.value() - self.minimum()) / span; p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(PAL.get("groove", "#444444"))); p.drawRoundedRect(QRectF(0, y, w, h), h / 2, h / 2)
+        p.setBrush(QColor(PAL.get("accent", "#ff0000"))); p.drawRoundedRect(QRectF(0, y, max(h, w * frac), h), h / 2, h / 2)
+        if big: p.drawEllipse(QPointF(min(max(w * frac, 7), w - 7), self.height() / 2), 7, 7)
+
+def dark_bar(w):
+    """Windows: make the title bar match the theme instead of a bright white strip."""
+    if sys.platform != "win32": return
+    try:
+        import ctypes
+        hwnd = int(w.winId()); dwm = ctypes.windll.dwmapi; bg = QColor(PAL.get("bg", "#0f0f0f")); tx = QColor(PAL.get("text", "#f1f1f1"))
+        for attr in (20, 19): dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(ctypes.c_int(1 if bg.lightnessF() < .5 else 0)), 4)
+        dwm.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(ctypes.c_int(bg.red() | bg.green() << 8 | bg.blue() << 16)), 4)
+        dwm.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(ctypes.c_int(tx.red() | tx.green() << 8 | tx.blue() << 16)), 4)
+    except Exception: pass
 
 MINI_STYLE = """
 QWidget#mini{background:#000;border:1px solid @@groove@@}
@@ -196,7 +290,7 @@ class Mini(QWidget):
         self.setWindowTitle("Mini player"); self.setWindowIcon(o.windowIcon()); self.setMinimumSize(240, 150)
         self.lay = QVBoxLayout(self); self.lay.setContentsMargins(1, 1, 1, 1); self.lay.setSpacing(0)
         def b(t, tip, f):
-            x = QPushButton(t); x.setToolTip(tip); x.clicked.connect(f); x.setFocusPolicy(Qt.FocusPolicy.NoFocus); return x
+            x = IconBtn(GLYPH[t], tip, 18); x.clicked.connect(f); return x
         self.pb = b("▶", "Play / pause (Space)", o.mini_play)
         self.seek = ClickSlider(Qt.Orientation.Horizontal); self.seek.setFocusPolicy(Qt.FocusPolicy.NoFocus); self.seek.sliderMoved.connect(o.mp.setPosition)
         self.bot = DragBar(self); h = QHBoxLayout(self.bot); h.setContentsMargins(6, 2, 2, 2); h.setSpacing(0)
@@ -228,7 +322,7 @@ class FullWin(QWidget):
         self.setWindowTitle("Playlist Player"); self.setWindowIcon(o.windowIcon())
         self.lay = QVBoxLayout(self); self.lay.setContentsMargins(0, 0, 0, 0); self.lay.setSpacing(0)
         def b(t, tip, f):
-            x = QPushButton(t); x.setToolTip(tip); x.clicked.connect(f); x.setFocusPolicy(Qt.FocusPolicy.NoFocus); return x
+            x = IconBtn(GLYPH[t], tip, 18); x.clicked.connect(f); return x
         self.pb = b("▶", "Play / pause (Space)", o.mini_play)
         self.seek = ClickSlider(Qt.Orientation.Horizontal); self.seek.setFocusPolicy(Qt.FocusPolicy.NoFocus); self.seek.sliderMoved.connect(o.mp.setPosition)
         self.time = QLabel("0:00 / 0:00")
@@ -278,51 +372,59 @@ class Player(QMainWindow):
         self.video.installEventFilter(self)
         self.mini = Mini(self); self.fsw = FullWin(self)
 
-        # sidebar
+        # ---------- sidebar (YouTube "Up next" card)
         self.search = QLineEdit(); self.search.setPlaceholderText("Search"); self.search.setObjectName("search"); self.search.textChanged.connect(self.filter)
         self.list = QListWidget(); self.list.setItemDelegate(VideoDelegate(self)); self.list.setMouseTracking(True); self.list.itemClicked.connect(lambda it: self.play(it.data(Qt.ItemDataRole.UserRole)))
+        self.ytlist = QListWidget(); self.ytlist.setItemDelegate(VideoDelegate(self)); self.ytlist.setMouseTracking(True); self.ytlist.hide(); self.ytlist.itemClicked.connect(self.yt_play_item)
         self.info = QLabel("Drop a folder or .zip here"); self.info.setWordWrap(True); self.info.setObjectName("nowMeta")
-        openb = QPushButton("📁  Open folder"); openb.setObjectName("pill"); openb.clicked.connect(self.open_folder)
-        more = QPushButton("⋯"); more.setObjectName("icon"); more.setToolTip("More"); mm = QMenu(self)
-        mm.addAction("Appearance & settings…", self.open_settings); mm.addAction("Open zip…", self.open_zip); mm.addAction("Clear extracted zips", self.clear_zips); mm.addAction("YouTube API key…", self.set_key)
-        mm.addAction(f"Check for updates (v{__version__})", lambda: self.check_update(True)); mm.addAction("Update source (GitHub repo)…", self.set_update_repo); more.setMenu(mm)
-        self.ytb = QPushButton("▶  YouTube mode"); self.ytb.setObjectName("pill"); self.ytb.setToolTip("Plays in YouTube's official player, so views count"); self.ytb.setCheckable(True); self.ytb.clicked.connect(self.yt_toggle)
-        minib = QPushButton("◱"); minib.setObjectName("icon"); minib.setToolTip("Mini player (I)"); minib.clicked.connect(self.mini_toggle)
+        self.head = QLabel("Local files"); self.head.setObjectName("head")
+        self.empty = QLabel("No videos yet.\nDrop a folder or .zip anywhere on this window,\nor switch on YouTube mode."); self.empty.setObjectName("empty"); self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter); self.empty.setWordWrap(True)
         self.chips = []; self.chipbar = QWidget(); cb = QHBoxLayout(self.chipbar); cb.setContentsMargins(0, 0, 0, 0); cb.setSpacing(8)
         for i, nm in enumerate(("All", "Unwatched", "Watched")):
             c = QPushButton(nm); c.setObjectName("pill"); c.setCheckable(True); c.setChecked(i == 0); c.clicked.connect(lambda _=False, i=i: self.set_chip(i)); self.chips.append(c); cb.addWidget(c)
         cb.addStretch(1)
-        side = QWidget(); sl = QVBoxLayout(side); sl.setContentsMargins(12, 12, 12, 12); sl.setSpacing(8)
-        self.ytlist = QListWidget(); self.ytlist.setItemDelegate(VideoDelegate(self)); self.ytlist.setMouseTracking(True); self.ytlist.hide(); self.ytlist.itemClicked.connect(self.yt_play_item)
-        self.head = QLabel("Local files"); self.head.setObjectName("head")
-        for w in (self.head, self.info, self.chipbar, self.list, self.ytlist): sl.addWidget(w)
+        side = QWidget(); sl = QVBoxLayout(side); sl.setContentsMargins(14, 14, 14, 10); sl.setSpacing(8)
+        for w in (self.head, self.info, self.chipbar): sl.addWidget(w)
+        sl.addWidget(self.list, 1); sl.addWidget(self.ytlist, 1); sl.addWidget(self.empty, 1)
         side.setObjectName("side"); side.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True); side.setMinimumWidth(390); self.side = side
 
-        # controls
-        def btn(t, tip, f, chk=False):
-            b = QPushButton(t); b.setToolTip(tip); b.clicked.connect(f); b.setCheckable(chk); b.setFocusPolicy(Qt.FocusPolicy.NoFocus); b.setMinimumWidth(38); return b
-        self.pbtn = btn("▶", "Play/Pause (Space)", self.toggle); self.pbtn.setObjectName("play")
+        # ---------- controls (seek bar on top, buttons below, like YouTube)
+        def tb(name, tip, f, chk=False, size=22):
+            b = IconBtn(name, tip, size); b.setObjectName("icon"); b.setCheckable(chk); b.clicked.connect(f); return b
+        self.pbtn = IconBtn("play", "Play / pause (Space)", 20, ckey="bg"); self.pbtn.setObjectName("play"); self.pbtn.clicked.connect(self.toggle)
         self.seek = ClickSlider(Qt.Orientation.Horizontal); self.seek.sliderMoved.connect(self.mp.setPosition); self.seek.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.time = QLabel("0:00 / 0:00")
-        self.speed = QComboBox(); self.speed.addItems([f"{s}x" for s in SPEEDS]); self.speed.setCurrentIndex(SPEEDS.index(float(self.cfg.value("speed", 1.0))))
-        self.speed.currentIndexChanged.connect(self.set_speed); self.speed.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.vol = QSlider(Qt.Orientation.Horizontal); self.vol.setRange(0, 100); self.vol.setFixedWidth(90); self.vol.setValue(int(self.audio.volume() * 100))
+        self.time = QLabel("0:00 / 0:00"); self.time.setObjectName("time")
+        self.speed = QComboBox(); self.speed.setObjectName("speed"); self.speed.addItems([f"{s}x" for s in SPEEDS]); self.speed.setCurrentIndex(SPEEDS.index(float(self.cfg.value("speed", 1.0))))
+        self.speed.currentIndexChanged.connect(self.set_speed); self.speed.setFocusPolicy(Qt.FocusPolicy.NoFocus); self.speed.setToolTip("Playback speed ( [ and ] )")
+        self.vol = ClickSlider(Qt.Orientation.Horizontal); self.vol.setRange(0, 100); self.vol.setFixedWidth(80); self.vol.setValue(int(self.audio.volume() * 100))
         self.vol.valueChanged.connect(lambda v: self.audio.setVolume(v / 100)); self.vol.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.shuf = btn("⇄", "Shuffle (S)", self.rebuild_order, True)
-        self.rep = btn("↻", "Repeat: off (R)", self.cycle_repeat, True)
-        self.auto = btn("⇥", "Auto-play next video", lambda: None, True); self.auto.setChecked(True)
-        self.sleep = btn("☾", "Sleep timer: click to cycle off/15/30/60 min", self.cycle_sleep, True)
+        self.muteb = tb("vol", "Mute (M)", self.mute)
+        self.shuf = tb("shuffle", "Shuffle (S)", self.rebuild_order, True)
+        self.rep = tb("repeat", "Repeat: off (R)", self.cycle_repeat, True)
+        self.auto = tb("ff", "Auto-play next video", lambda: None, True); self.auto.setChecked(True)
+        self.sleep = tb("sleep", "Sleep timer: click to cycle off / 15 / 30 / 60 min", self.cycle_sleep, True)
         self.sleep_min = 0; self.sleep_timer = QTimer(singleShot=True); self.sleep_timer.timeout.connect(lambda: (self.mp.pause(), self.flash("Sleep timer: paused")))
-        bar = QHBoxLayout()
-        for w in (btn("⏮", "Previous (P)", self.prev), self.pbtn, btn("⏭", "Next (N)", self.next), self.seek, self.time, self.speed,
-                  btn("🔊", "Mute (M)", self.mute), self.vol, self.shuf, self.rep, self.auto, self.sleep,
-                  btn("◱", "Mini player (I)", self.mini_toggle), btn("☰", "Toggle playlist (T)", self.toggle_side), btn("⛶", "Fullscreen (F)", self.fullscreen)):
-            bar.addWidget(w, 1 if w is self.seek else 0)
-        self.controls = QWidget(); self.controls.setObjectName("controls"); bar.setContentsMargins(14, 8, 14, 10); bar.setSpacing(4); self.controls.setLayout(bar)
+        row = QHBoxLayout(); row.setSpacing(2); row.setContentsMargins(0, 0, 0, 0)
+        for w in (tb("prev", "Previous (P)", self.prev), self.pbtn, tb("next", "Next (N)", self.next), self.muteb, self.vol, self.time): row.addWidget(w)
+        row.addStretch(1)
+        for w in (self.shuf, self.rep, self.auto, self.sleep, self.speed, tb("pip", "Mini player (I)", self.mini_toggle), tb("playlist", "Show / hide playlist (T)", self.toggle_side), tb("fs", "Fullscreen (F)", self.fullscreen)): row.addWidget(w)
+        self.controls = QWidget(); self.controls.setObjectName("controls"); cl = QVBoxLayout(self.controls); cl.setContentsMargins(0, 6, 0, 4); cl.setSpacing(2); cl.addWidget(self.seek); cl.addLayout(row)
         self.osd = QLabel("", self.video); self.osd.setStyleSheet("background:rgba(0,0,0,170);color:#fff;padding:8px 14px;border-radius:8px;font-size:16px"); self.osd.hide()
         self.osd_t = QTimer(singleShot=True, interval=1200); self.osd_t.timeout.connect(self.osd.hide)
 
-        left = QWidget(); ll = QVBoxLayout(left); ll.setContentsMargins(20, 12, 0, 0); ll.setSpacing(0); self.stack = QStackedWidget(); self.stack.addWidget(self.video); self.web = None; ll.addWidget(self.stack, 1)
+        # ---------- welcome screen (shown until something is loaded)
+        self.welcome = QWidget(); wl = QVBoxLayout(self.welcome); wl.setAlignment(Qt.AlignmentFlag.AlignCenter); wl.setSpacing(14)
+        wlogo = QLabel(); wlogo.setPixmap(self.windowIcon().pixmap(88, 88)); wlogo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        wt = QLabel("Your playlists, without the noise"); wt.setObjectName("welcomeTitle"); wt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ws = QLabel("Paste a YouTube playlist (views still count for the creator) or open videos from your computer."); ws.setObjectName("nowMeta"); ws.setAlignment(Qt.AlignmentFlag.AlignCenter); ws.setWordWrap(True)
+        w1 = IconBtn("play", "", 20, ckey="onacc", text="Paste a YouTube playlist"); w1.setObjectName("primary"); w1.clicked.connect(self.welcome_yt)
+        w2 = IconBtn("folder", "", 20, text="Open a folder"); w2.setObjectName("pill"); w2.clicked.connect(self.open_folder)
+        wrow = QHBoxLayout(); wrow.setSpacing(10); wrow.addStretch(1); wrow.addWidget(w1); wrow.addWidget(w2); wrow.addStretch(1)
+        for w in (wlogo, wt, ws): wl.addWidget(w)
+        wl.addSpacing(6); wl.addLayout(wrow)
+
+        left = QWidget(); ll = QVBoxLayout(left); ll.setContentsMargins(20, 12, 0, 0); ll.setSpacing(0)
+        self.stack = QStackedWidget(); self.stack.addWidget(self.welcome); self.stack.addWidget(self.video); self.stack.setCurrentWidget(self.welcome); self.web = None; ll.addWidget(self.stack, 1)
         self.strip = QWidget(); sv = QVBoxLayout(self.strip); sv.setContentsMargins(4, 14, 4, 10); sv.setSpacing(10)
         self.now_title = QLabel(); self.now_title.setObjectName("nowTitle"); self.now_title.setWordWrap(True)
         self.avatar = QLabel("?"); self.avatar.setObjectName("avatar"); self.now_author = QLabel(); self.now_author.setObjectName("author")
@@ -330,13 +432,24 @@ class Player(QMainWindow):
         self.now_meta = QLabel(); self.now_meta.setObjectName("desc"); self.now_meta.setWordWrap(True)
         sv.addWidget(self.now_title); sv.addLayout(arow); sv.addWidget(self.now_meta); self.show_local()
         ll.addWidget(self.controls); ll.addWidget(self.strip)
-        self.leftw = left; sp = QSplitter(); sp.addWidget(left); sp.addWidget(side); sp.setStretchFactor(0, 1); sp.setSizes([980, 300]); gear = QPushButton("⚙"); gear.setObjectName("icon"); gear.setToolTip("Appearance & settings (Ctrl+,)"); gear.clicked.connect(self.open_settings)
+        self.controls.hide(); self.strip.hide()
+
+        # ---------- header bar
+        sbtn = IconBtn("search", "Search", 20); sbtn.setObjectName("searchbtn"); sbtn.clicked.connect(self.filter)
+        openb = IconBtn("folder", "Open a folder (Ctrl+O)", 18, text="Open"); openb.setObjectName("pill"); openb.clicked.connect(self.open_folder)
+        self.ytb = IconBtn("play", "Plays in YouTube's official player, so views count", 18, on_key="bg", text="YouTube mode"); self.ytb.setObjectName("pill"); self.ytb.setCheckable(True); self.ytb.clicked.connect(self.yt_toggle)
+        minib = IconBtn("pip", "Mini player (I)", 22); minib.setObjectName("icon"); minib.clicked.connect(self.mini_toggle)
+        gear = IconBtn("settings", "Appearance & settings (Ctrl+,)", 22); gear.setObjectName("icon"); gear.clicked.connect(self.open_settings)
+        more = IconBtn("more", "More", 22); more.setObjectName("icon"); mm = QMenu(self)
+        mm.addAction("Appearance & settings…", self.open_settings); mm.addAction("Open zip…", self.open_zip); mm.addAction("Clear extracted zips", self.clear_zips); mm.addAction("YouTube API key…", self.set_key)
+        mm.addAction(f"Check for updates (v{__version__})", lambda: self.check_update(True)); mm.addAction("Update source (GitHub repo)…", self.set_update_repo); more.setMenu(mm)
         logo = QLabel(); logo.setPixmap(self.windowIcon().pixmap(30, 30)); brand = QLabel("Playlist Player"); brand.setObjectName("brand")
-        sbtn = QPushButton("🔍"); sbtn.setObjectName("searchbtn"); sbtn.clicked.connect(self.filter)
-        self.header = QWidget(); hh = QHBoxLayout(self.header); hh.setContentsMargins(20, 8, 20, 8); hh.setSpacing(8)
+        self.header = QWidget(); hh = QHBoxLayout(self.header); hh.setContentsMargins(20, 8, 20, 8); hh.setSpacing(6)
         hh.addWidget(logo); hh.addWidget(brand); hh.addStretch(1)
         sbox = QHBoxLayout(); sbox.setSpacing(0); sbox.addWidget(self.search, 1); sbox.addWidget(sbtn); hh.addLayout(sbox, 6); hh.addStretch(1)
         for w in (openb, self.ytb, minib, gear, more): hh.addWidget(w)
+
+        self.leftw = left; sp = QSplitter(); sp.addWidget(left); sp.addWidget(side); sp.setStretchFactor(0, 1); sp.setSizes([980, 420])
         cw = QWidget(); cv = QVBoxLayout(cw); cv.setContentsMargins(0, 0, 20, 16); cv.setSpacing(0); cv.addWidget(self.header); cv.addWidget(sp); self.setCentralWidget(cw)
         self.sp = sp
 
@@ -355,7 +468,8 @@ class Player(QMainWindow):
         for d in range(10): QShortcut(QKeySequence(str(d)), self, activated=lambda d=d: self.mp.setPosition(int(self.mp.duration() * d / 10)))
         g = self.cfg.value("geometry")
         if g: self.restoreGeometry(g)
-        else: self.resize(1280, 760)
+        else: self.resize(1360, 840)
+        self.setMinimumSize(900, 560)
         self.update_found.connect(self.on_update); self.title_found.connect(self.on_title); self.stats_found.connect(self.on_stats); self.thumb_found.connect(self.on_thumb); self.dl_progress.connect(self.on_dl_progress); self.dl_done.connect(self.on_dl_done); QTimer.singleShot(4000, self.check_update); self.layout_side(); self.apply_opts()
         last = self.cfg.value("source")
         if last and os.path.isdir(last): self.load_dir(last)
@@ -401,6 +515,7 @@ class Player(QMainWindow):
             it.setText(stem); it.setData(ROLE_TITLE, stem); it.setData(ROLE_NUM, i + 1); it.setData(ROLE_DONE, done)
             it.setData(ROLE_SUB, [Path(f).parent.name or "Local file", "Watched" if done else (f"Resume at {fmt(p)}" if p > 10000 else "")])
             it.setData(ROLE_DUR, fmt(d) if d else ""); it.setData(ROLE_PROG, 1.0 if done else (min(1.0, p / d) if d and p > 10000 else 0.0))
+        self.update_empty()
     def set_chip(self, i):
         self.chip_mode = i
         for k, c in enumerate(self.chips): c.setChecked(k == i)
@@ -418,6 +533,7 @@ class Player(QMainWindow):
     # ---- playback
     def play(self, i, autostart=True):
         if not (0 <= i < len(self.files)): return
+        self.show_surface()
         self.idx = i; f = self.files[i]; self.cfg.setValue("last_file", f)
         self.mp.setSource(QUrl.fromLocalFile(f)); self.mp.setPlaybackRate(SPEEDS[self.speed.currentIndex()])
         self._resume = self.pos.get(f, 0) if OPT["resume"] else 0
@@ -465,11 +581,11 @@ class Player(QMainWindow):
         if self.ytb.isChecked(): return
         self.mp.setPosition(max(0, self.mp.position() + s * 1000)); self.flash(f"{'+' if s > 0 else ''}{s}s")
     def volstep(self, d): self.vol.setValue(self.vol.value() + d); self.flash(f"Volume {self.vol.value()}%")
-    def mute(self): self.audio.setMuted(not self.audio.isMuted()); self.flash("Muted" if self.audio.isMuted() else "Unmuted")
+    def mute(self): self.audio.setMuted(not self.audio.isMuted()); self.muteb.set_name("vol_off" if self.audio.isMuted() else "vol"); self.flash("Muted" if self.audio.isMuted() else "Unmuted")
     def set_speed(self, i): self.mp.setPlaybackRate(SPEEDS[i]); self.cfg.setValue("speed", SPEEDS[i]); self.flash(f"Speed {SPEEDS[i]}x")
     def step_speed(self, d): self.speed.setCurrentIndex(min(len(SPEEDS) - 1, max(0, self.speed.currentIndex() + d)))
     def cycle_repeat(self):
-        self.repeat = (self.repeat + 1) % 3; n = ["off", "all", "one"][self.repeat]; self.rep.setToolTip(f"Repeat: {n} (R)"); self.rep.setChecked(self.repeat > 0); self.flash(f"Repeat {n}")
+        self.repeat = (self.repeat + 1) % 3; n = ["off", "all", "one"][self.repeat]; self.rep.setToolTip(f"Repeat: {n} (R)"); self.rep.setChecked(self.repeat > 0); self.rep.set_name("repeat_one" if self.repeat == 2 else "repeat"); self.flash(f"Repeat {n}")
     def cycle_sleep(self):
         self.sleep_min = {0: 15, 15: 30, 30: 60, 60: 0}[self.sleep_min]; self.sleep_timer.stop()
         if self.sleep_min: self.sleep_timer.start(self.sleep_min * 60000)
@@ -499,7 +615,7 @@ class Player(QMainWindow):
             page.fullScreenRequested.connect(self.yt_fs)
             self.web = QWebEngineView(); self.web.setPage(page); self.stack.addWidget(self.web)
         self.yt_start(pid)
-        self.stack.setCurrentWidget(self.web); self.controls.hide()
+        self.stack.setCurrentWidget(self.web); self.controls.hide(); self.strip.show(); self.empty.hide()
     def yt_resume(self): self.ytb.setChecked(True); self.yt_enter(self.cfg.value("yt_pl"))
     def ask(self, title, label, text="", items=None, ph=""):
         d = QDialog(self); d.setWindowTitle(title); d.setMinimumWidth(680)
@@ -551,11 +667,12 @@ function onYouTubeIframeAPIReady(){
         self.yt_first = True; self.yt_last_t = 0
         self.web.setHtml(self.PAGE.replace("__PID__", pid).replace("__START__", str(start)).replace("__TS__", str(ts)), QUrl("https://playlist-player.app/"))
         threading.Thread(target=self.yt_plmeta, args=(pid,), daemon=True).start()
-        self.ytlist.clear(); self.list.hide(); self.ytlist.show(); self.search.clear(); self.info.setText("Loading playlist…"); self.head.setText("YouTube playlist")
+        self.ytlist.clear(); self.list.hide(); self.empty.hide(); self.ytlist.show(); self.search.clear(); self.info.setText("Loading playlist…"); self.head.setText("YouTube playlist")
         self.yt_timer.start()
     def yt_off(self):
-        self.yt_timer.stop(); self.stack.setCurrentWidget(self.video); self.web.setHtml("")
-        self.controls.show(); self.side.show(); self.ytlist.hide(); self.list.show(); self.search.clear(); self.setWindowTitle("Playlist Player"); self.head.setText("Local files"); self.show_local()
+        self.yt_timer.stop(); self.show_surface()
+        if self.web: self.web.setHtml("")
+        self.side.show(); self.ytlist.hide(); self.list.show(); self.update_empty(); self.search.clear(); self.setWindowTitle("Playlist Player"); self.head.setText("Local files"); self.show_local()
         self.info.setText(f"{self.idx+1} of {len(self.files)}" if self.files else "Drop a folder or .zip here")
     def yt_cmd(self, js):
         if self.web: self.web.page().runJavaScript(js)
@@ -689,6 +806,17 @@ function onYouTubeIframeAPIReady(){
                 if fails >= 5: break          # blocked: stop instead of hammering YouTube
     def yt_play_item(self, it): self.yt_cmd(f"p.playVideoAt({self.ytlist.row(it)})")
 
+    def show_surface(self):
+        yt = self.ytb.isChecked(); w = self.web if yt else (self.video if self.files else self.welcome)
+        if w is not None and self.stack.indexOf(w) >= 0: self.stack.setCurrentWidget(w)
+        home = w is self.welcome
+        self.strip.setVisible(not home); self.controls.setVisible(not home and not yt)
+    def welcome_yt(self):
+        self.ytb.setChecked(True); self.yt_toggle()
+    def update_empty(self):
+        if self.ytb.isChecked(): self.empty.hide(); return
+        none = self.list.count() == 0; self.empty.setVisible(none); self.list.setVisible(not none)
+
     # ---- appearance & settings
     def layout_side(self):
         left = OPT["side"] == "left"
@@ -707,6 +835,11 @@ function onYouTubeIframeAPIReady(){
                           (QPalette.ColorRole.HighlightedText, "onacc"), (QPalette.ColorRole.ToolTipBase, "surface"), (QPalette.ColorRole.ToolTipText, "text"), (QPalette.ColorRole.PlaceholderText, "muted")):
             pal.setColor(role, QColor(PAL[key]))
         app.setPalette(pal)
+        for b in list(IconBtn.ALL):
+            try: b.refresh()
+            except RuntimeError: IconBtn.ALL.remove(b)
+        for w in QApplication.topLevelWidgets():
+            if w.isVisible() and not (w.windowFlags() & Qt.WindowType.FramelessWindowHint): dark_bar(w)
         self.refresh_items()
     def set_opts(self, o):
         was = OPT["thumbs"]; OPT.clear(); OPT.update(DEFAULTS); OPT.update(o); self.cfg.setValue("opt2", json.dumps(OPT))
@@ -778,6 +911,7 @@ function onYouTubeIframeAPIReady(){
             self.showNormal(); self.raise_(); self.activateWindow()
         else:                                  # shrink into the mini player
             if self.fsw.isVisible(): self.exit_fs()
+            if self.stack.currentWidget() is self.welcome: return
             yt = self.ytb.isChecked(); w = self.web if yt else self.video
             self.stack.removeWidget(w); m.lay.insertWidget(0, w, 1); w.show(); m.surface = w
             m.seek.setVisible(not yt); m.pb.setText("⏯" if yt else self.pbtn.text())
@@ -871,7 +1005,7 @@ function onYouTubeIframeAPIReady(){
         if self.fsw.isVisible(): self.exit_fs()
         else: self.enter_fs()
     def enter_fs(self):
-        if self.fsw.isVisible() or self.mini.isVisible(): return
+        if self.fsw.isVisible() or self.mini.isVisible() or self.stack.currentWidget() is self.welcome: return
         f = self.fsw; yt = self.ytb.isChecked(); w = self.web if yt else self.video
         self.stack.removeWidget(w); f.lay.insertWidget(0, w, 1); w.show(); f.surface = w; f.local = not yt
         f.bar.hide(); f.seek.setRange(0, self.mp.duration()); f.pb.setText(self.pbtn.text())
@@ -885,6 +1019,7 @@ function onYouTubeIframeAPIReady(){
     def autohide(self):
         if self.isFullScreen(): self.controls.hide(); self.setCursor(Qt.CursorShape.BlankCursor)
     def eventFilter(self, o, e):
+        if e.type() == QEvent.Type.Show and isinstance(o, QWidget) and o.isWindow() and not (o.windowFlags() & Qt.WindowType.FramelessWindowHint): dark_bar(o)
         if e.type() == QEvent.Type.MouseMove and self.isFullScreen():
             self.controls.setVisible(not self.ytb.isChecked()); self.unsetCursor(); self.hide_t.start()
         if o is self.video:
